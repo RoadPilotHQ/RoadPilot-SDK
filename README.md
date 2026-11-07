@@ -3,19 +3,33 @@
 Prototype of a native SCS **Input API** plugin for American Truck Simulator and
 Euro Truck Simulator 2 (Windows x64). It registers one generic input device,
 "RoadPilot Input", with three float axes, **Throttle**, **Brake** (service brake) and **Steering**,
-and fills them from a local named pipe so a later RoadPilot process can drive them.
+and fills them from a local named pipe so a later RoadPilot process can drive them. It is the Input SDK counterpart of [RoadPilot-Telemetry](https://github.com/RoadPilotHQ/RoadPilot-Telemetry), which is read-only and a separate plugin; the two share no code or pipe.
 
 Scope of this prototype: throttle, service brake and steering (protocol v2; v1 clients keep
 working with throttle and brake only). There is no driving logic in this repository. Nothing is written to
 `controls.sii`, profiles, saves or game files.
 
+## Status
+
+Phase 4.3 (steering input support) is completed in this repository: protocol v2, the steering axis (index 2) and tests. **There is currently no RoadPilot input sender and no steering activation UI**, and no driving logic. The 50 ms command refresh interval is a requirement for that future sender, not an existing, verified capability. Nothing here has been tested in ATS or ETS2 (see [Test status](#test-status)); the fake-host tests do not prove in-game control.
+
+| Item | Value |
+|---|---|
+| Protocol | v1 (16 bytes, throttle and brake) and v2 (20 bytes, adds steering); v1 clients stay supported and cannot steer |
+| Steering activation | needs `enabled` and `steering_enabled`; disarmed by default, never armed automatically |
+| Steering range, rate limit | -1.0 to 1.0, magnitude increase at most 2.0 units per second, direction change goes through zero |
+| Timeouts | steering 150 ms, throttle and brake 250 ms; stale input releases to neutral |
+| Client refresh | at least every 50 ms (future sender requirement) |
+
+All values and rules are specified in [docs/PROTOCOL.md](docs/PROTOCOL.md).
+
 ## Layout
 
 - `src/input_protocol.*`: wire format parser/encoder (platform independent)
-- `src/input_state.*`: arm/disarm, clamping, brake priority, stale timeout (platform independent)
+- `src/input_state.*`: arm/disarm, clamping, brake priority, steering gates, rate limit and stale timeouts (platform independent)
 - `src/pipe_server.*`: Windows named pipe transport (no SDK, no meaning of messages)
 - `src/plugin.cpp`: SCS SDK callbacks only
-- `docs/PROTOCOL.md`: message format and fail-safe rules
+- `docs/PROTOCOL.md`: message formats (v1 and v2), steering rules, timeouts, client heartbeat requirements and fail-safe rules (the authoritative specification)
 - `tests/`: `core_tests` (no game, no SDK) and `plugin_host_tests` (loads the DLL into a fake host)
 
 ## Build
