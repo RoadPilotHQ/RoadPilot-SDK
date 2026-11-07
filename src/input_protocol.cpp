@@ -52,17 +52,26 @@ const char* to_string(ParseStatus status) {
 
 ParseStatus parse_message(const std::uint8_t* data, std::size_t size, Command& out) {
   out = Command{};
-  if (data == nullptr || size != kMessageSize) return ParseStatus::BadSize;
+  if (data == nullptr || (size != kMessageSize && size != kMessageSizeV2)) return ParseStatus::BadSize;
   if (read_u32(data) != kMagic) return ParseStatus::BadMagic;
-  if (read_u16(data + 4) != kProtocolVersion) return ParseStatus::BadVersion;
+  const std::uint16_t version = read_u16(data + 4);
+  if (version != kProtocolVersion && version != kProtocolVersionV2) return ParseStatus::BadVersion;
+  // The version decides the size; a mismatch is a malformed message.
+  if ((version == kProtocolVersion) != (size == kMessageSize)) return ParseStatus::BadSize;
   if (data[6] > 1) return ParseStatus::BadEnabled;
-  if (data[7] != 0) return ParseStatus::BadReserved;
+  const bool v2 = version == kProtocolVersionV2;
+  if (v2 ? (data[7] & ~kFlagSteeringEnabled) != 0 : data[7] != 0) return ParseStatus::BadReserved;
   const float throttle = read_f32(data + 8);
   const float brake = read_f32(data + 12);
-  if (!std::isfinite(throttle) || !std::isfinite(brake)) return ParseStatus::NonFinite;
+  const float steering = v2 ? read_f32(data + 16) : 0.0f;
+  if (!std::isfinite(throttle) || !std::isfinite(brake) || !std::isfinite(steering)) {
+    return ParseStatus::NonFinite;
+  }
   out.enabled = data[6] == 1;
   out.throttle = throttle;
   out.brake = brake;
+  out.steering = steering;
+  out.steering_enabled = v2 && (data[7] & kFlagSteeringEnabled) != 0;
   return ParseStatus::Ok;
 }
 
@@ -75,6 +84,19 @@ std::array<std::uint8_t, kMessageSize> encode_message(const Command& command) {
   m[7] = 0;
   write_f32(m.data() + 8, command.throttle);
   write_f32(m.data() + 12, command.brake);
+  return m;
+}
+
+std::array<std::uint8_t, kMessageSizeV2> encode_message_v2(const Command& command) {
+  std::array<std::uint8_t, kMessageSizeV2> m{};
+  write_u32(m.data(), kMagic);
+  m[4] = static_cast<std::uint8_t>(kProtocolVersionV2 & 0xFF);
+  m[5] = static_cast<std::uint8_t>(kProtocolVersionV2 >> 8);
+  m[6] = command.enabled ? 1 : 0;
+  m[7] = command.steering_enabled ? kFlagSteeringEnabled : 0;
+  write_f32(m.data() + 8, command.throttle);
+  write_f32(m.data() + 12, command.brake);
+  write_f32(m.data() + 16, command.steering);
   return m;
 }
 

@@ -45,13 +45,13 @@ static SCSAPI_RESULT fake_register(const scs_input_device_t* const info) {
 static SCSAPI_VOID fake_log(const scs_log_type_t, const scs_string_t) {}
 
 struct Frame {
-  float v[2];
+  float v[3];
   int events;
 };
 
 // Runs one game frame: calls the event callback until not_found.
 static Frame run_frame(bool first_after_activation = false) {
-  Frame f{{-1.0f, -1.0f}, 0};
+  Frame f{{-1.0f, -1.0f, -2.0f}, 0};
   scs_u32_t flags = SCS_INPUT_EVENT_CALLBACK_FLAG_first_in_frame |
                     (first_after_activation ? SCS_INPUT_EVENT_CALLBACK_FLAG_first_after_activation : 0);
   for (int guard = 0; guard < 10; ++guard) {
@@ -62,8 +62,8 @@ static Frame run_frame(bool first_after_activation = false) {
     flags = 0;
     if (r == SCS_RESULT_not_found) return f;
     CHECK(r == SCS_RESULT_ok);
-    CHECK(ev.input_index < 2);
-    if (ev.input_index < 2) f.v[ev.input_index] = ev.value_float.value;
+    CHECK(ev.input_index < 3);
+    if (ev.input_index < 3) f.v[ev.input_index] = ev.value_float.value;
     ++f.events;
   }
   CHECK(false);  // callback never returned not_found
@@ -71,8 +71,10 @@ static Frame run_frame(bool first_after_activation = false) {
 }
 
 static bool in_range(const Frame& f) {
-  for (float v : f.v) {
-    if (!std::isfinite(v) || v < 0.0f || v > 1.0f) return false;
+  // Throttle and brake 0..1, steering -1..1.
+  for (int i = 0; i < 3; ++i) {
+    const float lo = i == 2 ? -1.0f : 0.0f;
+    if (!std::isfinite(f.v[i]) || f.v[i] < lo || f.v[i] > 1.0f) return false;
   }
   return true;
 }
@@ -98,6 +100,29 @@ static bool send_cmd(HANDLE pipe, const Command& c) {
   const auto m = encode_message(c);
   return write_raw(pipe, m.data(), static_cast<DWORD>(m.size()));
 }
+static bool send_cmd_v2(HANDLE pipe, const Command& c) {
+  const auto m = encode_message_v2(c);
+  return write_raw(pipe, m.data(), static_cast<DWORD>(m.size()));
+}
+
+// Acts like a client heartbeat: resends `c` every 40 ms (well inside the 150 ms steering
+// timeout) while polling game frames, until `pred` holds or `max_ms` pass.
+template <class P>
+static bool hold_until(HANDLE pipe, const Command& c, P pred, int max_ms = 2000) {
+  const auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(max_ms);
+  auto next_send = std::chrono::steady_clock::now();
+  while (std::chrono::steady_clock::now() < end) {
+    if (std::chrono::steady_clock::now() >= next_send) {
+      CHECK(send_cmd_v2(pipe, c));
+      next_send += std::chrono::milliseconds(40);
+    }
+    const Frame f = run_frame();
+    CHECK(in_range(f));
+    if (pred(f)) return true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+  return false;
+}
 
 static HANDLE connect_client() {
   for (int i = 0; i < 100; ++i) {
@@ -113,7 +138,9 @@ static HANDLE connect_client() {
   return INVALID_HANDLE_VALUE;
 }
 
-static auto is_zero = [](const Frame& f) { return f.v[0] == 0.0f && f.v[1] == 0.0f; };
+static auto is_zero = [](const Frame& f) {
+  return f.v[0] == 0.0f && f.v[1] == 0.0f && f.v[2] == 0.0f;
+};
 
 static void run_session(init_fn_t init, shutdown_fn_t shutdown, const char* game_id) {
   scs_input_init_params_v100_t params;
@@ -128,16 +155,18 @@ static void run_session(init_fn_t init, shutdown_fn_t shutdown, const char* game
   CHECK(init(SCS_INPUT_VERSION_1_00, &params) == SCS_RESULT_ok);
   CHECK(g_register_calls == 1);
   CHECK(g_device.type == SCS_INPUT_DEVICE_TYPE_generic);
-  CHECK(g_device.input_count == 2);
+  CHECK(g_device.input_count == 3);
   CHECK(g_device.input_event_callback != nullptr);
   CHECK(g_inputs[0].value_type == SCS_VALUE_TYPE_float);
   CHECK(g_inputs[1].value_type == SCS_VALUE_TYPE_float);
+  CHECK(g_inputs[2].value_type == SCS_VALUE_TYPE_float);
   CHECK(std::strcmp(g_inputs[0].name, "throttle") == 0);
   CHECK(std::strcmp(g_inputs[1].name, "brake") == 0);
+  CHECK(std::strcmp(g_inputs[2].name, "steering") == 0);
 
   // Startup state, no client yet: safe zeros, both axes reported.
   Frame f = run_frame(true);
-  CHECK(f.events == 2 && is_zero(f));
+  CHECK(f.events == 3 && is_zero(f));
 
   HANDLE pipe = connect_client();
   CHECK(pipe != INVALID_HANDLE_VALUE);
@@ -177,6 +206,34 @@ static void run_session(init_fn_t init, shutdown_fn_t shutdown, const char* game
   std::this_thread::sleep_for(std::chrono::milliseconds(400));
   f = run_frame();
   CHECK(is_zero(f));
+
+  // Steering (protocol v2): needs both flags, is rate limited, and is released when the
+  // client stops refreshing it. Throttle/brake keep working with v2 messages.
+  Command steer;
+  steer.enabled = true;
+  steer.steering = -0.2f;
+  steer.steering_enabled = true;
+  CHECK(hold_until(pipe, steer, [](const Frame& x) { return x.v[2] <= -0.19f; }));
+  steer.steering = 0.2f;  // reversal passes through zero, then ramps to the other side
+  CHECK(hold_until(pipe, steer, [](const Frame& x) { return x.v[2] >= 0.19f; }));
+  // The value never exceeds the commanded target.
+  CHECK(!hold_until(pipe, steer, [](const Frame& x) { return x.v[2] > 0.2001f; }, 300));
+  // Stop refreshing: steering is neutral after the 150 ms timeout (steering was the only
+  // armed output; throttle/brake are 0 anyway).
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));
+  CHECK(is_zero(run_frame()));
+  // Only the enabled flag, without steering_enabled: steering stays 0.
+  steer.steering_enabled = false;
+  CHECK(!hold_until(pipe, steer, [](const Frame& x) { return x.v[2] != 0.0f; }, 300));
+  // A v1 client cannot steer.
+  CHECK(send_cmd(pipe, {true, 0.4f, 0.0f}));
+  CHECK(wait_for([](const Frame& x) { return x.v[0] == 0.4f && x.v[2] == 0.0f; }));
+  // Explicit disarm releases steering immediately.
+  steer.steering_enabled = true;
+  CHECK(hold_until(pipe, steer, [](const Frame& x) { return x.v[2] > 0.0f; }));
+  steer.enabled = false;
+  CHECK(send_cmd_v2(pipe, steer));
+  CHECK(wait_for(is_zero));
 
   // Connection loss while armed -> safe, and stays safe.
   CHECK(send_cmd(pipe, {true, 0.8f, 0.0f}));

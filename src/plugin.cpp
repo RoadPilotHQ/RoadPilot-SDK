@@ -20,7 +20,8 @@ using namespace roadpilot::input;
 
 constexpr scs_u32_t kThrottleIndex = 0;
 constexpr scs_u32_t kBrakeIndex = 1;
-constexpr scs_u32_t kInputCount = 2;
+constexpr scs_u32_t kSteeringIndex = 2;
+constexpr scs_u32_t kInputCount = 3;
 
 std::uint64_t now_ms() {
   using namespace std::chrono;
@@ -60,9 +61,15 @@ SCSAPI_RESULT input_event_callback(scs_input_event_t* const event_info, const sc
   }
   if (p.next_input >= kInputCount) return SCS_RESULT_not_found;
 
-  // Both axes are reported every frame, including zeros, so releasing works.
+  // All axes are reported every frame, including neutral zeros, so releasing works.
   event_info->input_index = p.next_input;
-  event_info->value_float.value = (p.next_input == kThrottleIndex) ? p.frame.throttle : p.frame.brake;
+  float value = 0.0f;
+  switch (p.next_input) {
+    case kThrottleIndex: value = p.frame.throttle; break;
+    case kBrakeIndex: value = p.frame.brake; break;
+    case kSteeringIndex: value = p.frame.steering; break;
+  }
+  event_info->value_float.value = value;
   ++p.next_input;
   return SCS_RESULT_ok;
 }
@@ -85,6 +92,7 @@ SCSAPI_RESULT scs_input_init(const scs_u32_t version, const scs_input_init_param
   static const scs_input_device_input_t inputs[kInputCount] = {
       {"throttle", "Throttle", SCS_VALUE_TYPE_float},
       {"brake", "Brake", SCS_VALUE_TYPE_float},
+      {"steering", "Steering", SCS_VALUE_TYPE_float},
   };
   scs_input_device_t device;
   std::memset(&device, 0, sizeof(device));

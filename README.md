@@ -2,10 +2,11 @@
 
 Prototype of a native SCS **Input API** plugin for American Truck Simulator and
 Euro Truck Simulator 2 (Windows x64). It registers one generic input device,
-"RoadPilot Input", with two float axes, **Throttle** and **Brake** (service brake),
+"RoadPilot Input", with three float axes, **Throttle**, **Brake** (service brake) and **Steering**,
 and fills them from a local named pipe so a later RoadPilot process can drive them.
 
-Scope of this prototype: throttle and service brake only. Nothing is written to
+Scope of this prototype: throttle, service brake and steering (protocol v2; v1 clients keep
+working with throttle and brake only). There is no driving logic in this repository. Nothing is written to
 `controls.sii`, profiles, saves or game files.
 
 ## Layout
@@ -54,23 +55,43 @@ The device is a *generic* input device, so the game does not bind it automatical
    *RoadPilot Input → Throttle*. Do the same for **Brake** with *RoadPilot Input → Brake*.
    The binding needs the axis to move, so a client must send a non-zero value while binding.
 3. Make sure no other device/pedal is bound to the same function, or both will contribute.
+4. For steering, select the **Steering** entry of the controls and bind
+   *RoadPilot Input → Steering*. The binding needs the axis to move, so a client must send a
+   non-zero steering value (protocol v2, `steering_enabled` set) while binding. Check the
+   direction in game: the sign convention of the axis is not verified. Unbind the axis again
+   when you do not want RoadPilot to be able to steer.
+
+**Manual driving.** While the RoadPilot axes are bound the plugin reports neutral values
+(0) every frame when disarmed, as the Input SDK requires. How the game combines these with your
+own keyboard, wheel or pedals bound to the same functions is **unverified**; do not assume that
+manual steering keeps working. Keep a way to take over: disarm in the client, unbind the axis
+or remove the plugin.
 
 Exact menu labels differ between game versions; verify them in game.
 
 ## Safety behaviour
 
 At start, on invalid messages, on disconnect, on stale input (>250 ms), and on an explicit
-disable message the output is throttle 0 / brake 0 / disabled. If throttle and brake are
-requested together, throttle is set to 0 and brake kept. See `docs/PROTOCOL.md`.
+disable message the output is throttle 0 / brake 0 / steering 0 / disabled. If throttle and
+brake are requested together, throttle is set to 0 and brake kept.
+
+Steering is stricter: it needs both the `enabled` flag and the separate `steering_enabled`
+flag (never set by v1 clients), is clamped to -1..1, can grow by at most 2.0 units per second,
+goes through zero on a direction change, and is released immediately when no valid message
+arrived for 150 ms. A client must therefore refresh it at least every 50 ms, independently of
+any slower processing loop. Steering is never armed automatically. See `docs/PROTOCOL.md`.
 
 ## Test status
 
-Automated tests cover message validation, clamping, timeout, disarm, NaN/infinity,
-simultaneous throttle/brake, and a fake-host run of the real DLL over the real pipe.
+Automated tests cover message validation (v1 and v2), clamping, timeouts, disarm, NaN/infinity,
+simultaneous throttle/brake, steering gates, rate limiting, direction reversal, large polling
+gaps, and a fake-host run of the real DLL over the real pipe.
 These do **not** prove in-game control.
 
 **Open, not yet verified in ATS/ETS2:**
 - plugin loads and is activated by the game (ATS and ETS2, 64-bit)
+- the Steering axis can be bound, its range and sign convention, and how the game combines it
+  with manual steering input
 - device "RoadPilot Input" appears in the binding UI and both axes can be assigned
 - throttle/brake values from the pipe move the truck's pedals as expected, and release to 0
 - fallback to 0 on pipe disconnect and on client stalls, observed in game
